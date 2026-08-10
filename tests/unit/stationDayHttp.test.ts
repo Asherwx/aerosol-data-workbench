@@ -59,7 +59,7 @@ describe('station day HTTP worker', () => {
     )
   })
 
-  it('returns up to 48 station days while limiting upstream concurrency to six', async () => {
+  it('returns up to six station days while limiting upstream concurrency to six', async () => {
     let active = 0
     let maximum = 0
     const fetchSpy = vi.fn(async (input: string) => {
@@ -74,13 +74,13 @@ describe('station day HTTP worker', () => {
     vi.stubGlobal('fetch', fetchSpy)
     vi.stubGlobal('caches', { default: new MemoryCache() })
 
-    const dates = Array.from({ length: 48 }, (_, index) => new Date(Date.UTC(2024, 10, index + 1)).toISOString().slice(0, 10))
+    const dates = Array.from({ length: 6 }, (_, index) => new Date(Date.UTC(2024, 10, index + 1)).toISOString().slice(0, 10))
     const response = await worker.fetch(request(`/v1/station-day?dates=${dates.join(',')}&station=3329A`), ENV, {})
     const body = await response.json() as { days?: Array<{ date: string }> }
 
     expect(response.status).toBe(200)
     expect(body.days?.map((day) => day.date)).toEqual(dates)
-    expect(fetchSpy).toHaveBeenCalledTimes(48)
+    expect(fetchSpy).toHaveBeenCalledTimes(6)
     expect(maximum).toBe(6)
   })
 
@@ -88,7 +88,7 @@ describe('station day HTTP worker', () => {
     const fetchSpy = vi.fn()
     vi.stubGlobal('fetch', fetchSpy)
     vi.stubGlobal('caches', { default: new MemoryCache() })
-    const tooMany = Array.from({ length: 49 }, (_, index) => new Date(Date.UTC(2024, 10, index + 1)).toISOString().slice(0, 10)).join(',')
+    const tooMany = Array.from({ length: 7 }, (_, index) => new Date(Date.UTC(2024, 10, index + 1)).toISOString().slice(0, 10)).join(',')
     for (const dates of [tooMany, '2024-11-01,2024-11-01', '2024-11-01,2024-02-30']) {
       const response = await worker.fetch(request(`/v1/station-day?dates=${dates}&station=3329A`), ENV, {})
       expect(response.status).toBe(400)

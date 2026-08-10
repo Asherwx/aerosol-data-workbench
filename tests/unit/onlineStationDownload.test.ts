@@ -87,21 +87,31 @@ describe('downloadStationRange', () => {
     expect(new URL(urls[0]).searchParams.get('dates')).toBe('2024-11-01,2024-11-02,2024-11-03')
   })
 
-  it('limits each browser batch to 48 dates so a 61-day range needs only two browser requests', async () => {
+  it('paces six-day browser batches to avoid sustained transport failures', async () => {
+    vi.useFakeTimers()
     const batchSizes: number[] = []
-    const result = await downloadStationRange({
-      startDate: '2024-11-01', endDate: '2024-12-31', stationId: '3329A', endpoint: 'https://example.test/data', signal,
-      fetcher: async (input) => {
-        const dates = new URL(String(input)).searchParams.get('dates')?.split(',') ?? []
-        batchSizes.push(dates.length)
-        return new Response(JSON.stringify({ days: dates.map((date) => JSON.parse(stationDayResponse(date, 1))) }), {
-          headers: { 'content-type': 'application/json' },
-        })
-      },
-    })
-
-    expect(batchSizes).toEqual([48, 13])
-    expect(result.rows).toHaveLength(61)
+    try {
+      const task = downloadStationRange({
+        startDate: '2024-11-01', endDate: '2024-11-13', stationId: '3329A', endpoint: 'https://example.test/data', signal,
+        fetcher: async (input) => {
+          const dates = new URL(String(input)).searchParams.get('dates')?.split(',') ?? []
+          batchSizes.push(dates.length)
+          return new Response(JSON.stringify({ days: dates.map((date) => JSON.parse(stationDayResponse(date, 1))) }), {
+            headers: { 'content-type': 'application/json' },
+          })
+        },
+      })
+      await vi.advanceTimersByTimeAsync(2_999)
+      expect(batchSizes).toEqual([6])
+      await vi.advanceTimersByTimeAsync(1)
+      expect(batchSizes).toEqual([6, 6])
+      await vi.advanceTimersByTimeAsync(3_000)
+      const result = await task
+      expect(batchSizes).toEqual([6, 6, 1])
+      expect(result.rows).toHaveLength(13)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('waits for the worker cache before retrying a failed browser batch', async () => {

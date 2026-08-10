@@ -15,7 +15,8 @@ const MAX_RANGE_WARNING_TOTAL =
   MAX_DOWNLOAD_RANGE_DAYS * (MAX_DAY_WARNING_TOTAL + 24 * 6 + 1)
 const MAX_DATA_TYPES_PER_HOUR = 64
 const MAX_DAY_ATTEMPTS = 3
-const MAX_BATCH_DAYS = 48
+const MAX_BATCH_DAYS = 6
+const BATCH_COOLDOWN_MS = 3_000
 
 type DayData = { rows: HourlyStationRow[]; allRows: HourlyStationDataRow[]; warnings: string[]; warningTotal: number }
 
@@ -355,6 +356,9 @@ export async function downloadStationRange(options: DownloadStationRangeOptions)
             reportProgress()
             if (stopped) break
           }
+        }
+        if (!stopped && start + batch.length < links.length) {
+          await retryDelay(internalController.signal, BATCH_COOLDOWN_MS)
         }
       }
     } else {

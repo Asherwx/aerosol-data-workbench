@@ -7,7 +7,7 @@ const UPSTREAM_TIMEOUT_MS = 30_000
 const CACHE_MAX_AGE_SECONDS = 6 * 60 * 60
 const CACHE_SCHEMA_VERSION = '2'
 const ERROR_LIMIT = 256
-const MAX_BATCH_DAYS = 48
+const MAX_BATCH_DAYS = 6
 const MAX_UPSTREAM_CONCURRENCY = 6
 
 export interface WorkerEnv {
