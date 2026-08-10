@@ -267,7 +267,7 @@ async function fetchBatchWithRetry(
       const message = error instanceof Error ? error.message : String(error)
       const retryable = error instanceof TypeError || /^HTTP (?:408|429|5\d\d)$/.test(message)
       if (!retryable || attempt === MAX_DAY_ATTEMPTS) break
-      await retryDelay(signal, attempt === 1 ? 100 : 300)
+      await retryDelay(signal, attempt === 1 ? 2_000 : 5_000)
     }
   }
   throw lastError

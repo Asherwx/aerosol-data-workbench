@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { downloadStationRange, isSafeStationEndpoint } from '../../src/core/onlineStationDownload'
 
@@ -102,6 +102,31 @@ describe('downloadStationRange', () => {
 
     expect(batchSizes).toEqual([6, 6, 1])
     expect(result.rows).toHaveLength(13)
+  })
+
+  it('waits for the worker cache before retrying a failed browser batch', async () => {
+    vi.useFakeTimers()
+    let attempts = 0
+    try {
+      const task = downloadStationRange({
+        startDate: '2024-11-01', endDate: '2024-11-02', stationId: '3329A', endpoint: 'https://example.test/data', signal,
+        fetcher: async (input) => {
+          attempts += 1
+          if (attempts === 1) throw new TypeError('transport reset while the worker finishes caching')
+          const dates = new URL(String(input)).searchParams.get('dates')?.split(',') ?? []
+          return new Response(JSON.stringify({ days: dates.map((date) => JSON.parse(stationDayResponse(date, 1))) }), {
+            headers: { 'content-type': 'application/json' },
+          })
+        },
+      })
+      await vi.advanceTimersByTimeAsync(1_999)
+      expect(attempts).toBe(1)
+      await vi.advanceTimersByTimeAsync(1)
+      await expect(task).resolves.toMatchObject({ failedDates: [] })
+      expect(attempts).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('refuses to create a partial file when any requested date still fails', async () => {
