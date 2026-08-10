@@ -15,7 +15,7 @@ const MAX_RANGE_WARNING_TOTAL =
   MAX_DOWNLOAD_RANGE_DAYS * (MAX_DAY_WARNING_TOTAL + 24 * 6 + 1)
 const MAX_DATA_TYPES_PER_HOUR = 64
 const MAX_DAY_ATTEMPTS = 3
-const MAX_BATCH_DAYS = 6
+const MAX_BATCH_DAYS = 48
 
 type DayData = { rows: HourlyStationRow[]; allRows: HourlyStationDataRow[]; warnings: string[]; warningTotal: number }
 

@@ -59,28 +59,36 @@ describe('station day HTTP worker', () => {
     )
   })
 
-  it('returns a bounded batch of station days in one browser request', async () => {
+  it('returns up to 48 station days while limiting upstream concurrency to six', async () => {
+    let active = 0
+    let maximum = 0
     const fetchSpy = vi.fn(async (input: string) => {
+      active += 1
+      maximum = Math.max(maximum, active)
       const rawDate = input.match(/china_sites_(\d{8})\.csv$/)?.[1] ?? ''
       const body = ['date,hour,type,3329A', `${rawDate},0,SO2,3`].join('\n')
+      await new Promise((resolve) => setTimeout(resolve, 2))
+      active -= 1
       return upstream(body)
     })
     vi.stubGlobal('fetch', fetchSpy)
     vi.stubGlobal('caches', { default: new MemoryCache() })
 
-    const response = await worker.fetch(request('/v1/station-day?dates=2024-11-01,2024-11-02,2024-11-03&station=3329A'), ENV, {})
+    const dates = Array.from({ length: 48 }, (_, index) => new Date(Date.UTC(2024, 10, index + 1)).toISOString().slice(0, 10))
+    const response = await worker.fetch(request(`/v1/station-day?dates=${dates.join(',')}&station=3329A`), ENV, {})
     const body = await response.json() as { days?: Array<{ date: string }> }
 
     expect(response.status).toBe(200)
-    expect(body.days?.map((day) => day.date)).toEqual(['2024-11-01', '2024-11-02', '2024-11-03'])
-    expect(fetchSpy).toHaveBeenCalledTimes(3)
+    expect(body.days?.map((day) => day.date)).toEqual(dates)
+    expect(fetchSpy).toHaveBeenCalledTimes(48)
+    expect(maximum).toBe(6)
   })
 
   it('rejects oversized, duplicate, or malformed date batches before upstream access', async () => {
     const fetchSpy = vi.fn()
     vi.stubGlobal('fetch', fetchSpy)
     vi.stubGlobal('caches', { default: new MemoryCache() })
-    const tooMany = Array.from({ length: 7 }, (_, index) => `2024-11-${String(index + 1).padStart(2, '0')}`).join(',')
+    const tooMany = Array.from({ length: 49 }, (_, index) => new Date(Date.UTC(2024, 10, index + 1)).toISOString().slice(0, 10)).join(',')
     for (const dates of [tooMany, '2024-11-01,2024-11-01', '2024-11-01,2024-02-30']) {
       const response = await worker.fetch(request(`/v1/station-day?dates=${dates}&station=3329A`), ENV, {})
       expect(response.status).toBe(400)

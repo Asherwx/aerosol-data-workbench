@@ -87,10 +87,10 @@ describe('downloadStationRange', () => {
     expect(new URL(urls[0]).searchParams.get('dates')).toBe('2024-11-01,2024-11-02,2024-11-03')
   })
 
-  it('limits each browser batch to six dates', async () => {
+  it('limits each browser batch to 48 dates so a 61-day range needs only two browser requests', async () => {
     const batchSizes: number[] = []
     const result = await downloadStationRange({
-      startDate: '2024-11-01', endDate: '2024-11-13', stationId: '3329A', endpoint: 'https://example.test/data', signal,
+      startDate: '2024-11-01', endDate: '2024-12-31', stationId: '3329A', endpoint: 'https://example.test/data', signal,
       fetcher: async (input) => {
         const dates = new URL(String(input)).searchParams.get('dates')?.split(',') ?? []
         batchSizes.push(dates.length)
@@ -100,8 +100,8 @@ describe('downloadStationRange', () => {
       },
     })
 
-    expect(batchSizes).toEqual([6, 6, 1])
-    expect(result.rows).toHaveLength(13)
+    expect(batchSizes).toEqual([48, 13])
+    expect(result.rows).toHaveLength(61)
   })
 
   it('waits for the worker cache before retrying a failed browser batch', async () => {

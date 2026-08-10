@@ -7,7 +7,8 @@ const UPSTREAM_TIMEOUT_MS = 30_000
 const CACHE_MAX_AGE_SECONDS = 6 * 60 * 60
 const CACHE_SCHEMA_VERSION = '2'
 const ERROR_LIMIT = 256
-const MAX_BATCH_DAYS = 6
+const MAX_BATCH_DAYS = 48
+const MAX_UPSTREAM_CONCURRENCY = 6
 
 export interface WorkerEnv {
   ALLOWED_ORIGINS: string
@@ -150,6 +151,35 @@ async function resolveStationDay(
   return result
 }
 
+async function resolveStationDays(
+  sourceBase: URL,
+  dates: readonly string[],
+  stationId: string,
+  timeoutMs: number,
+  cache: CacheLike | undefined,
+): Promise<StationDayResponse[]> {
+  const results: Array<StationDayResponse | undefined> = Array.from({ length: dates.length })
+  let next = 0
+  let failed = false
+  let failure: unknown
+  const run = async (): Promise<void> => {
+    while (!failed) {
+      const index = next
+      next += 1
+      if (index >= dates.length) return
+      try {
+        results[index] = await resolveStationDay(sourceBase, dates[index], stationId, timeoutMs, cache)
+      } catch (cause) {
+        failed = true
+        failure = cause
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(MAX_UPSTREAM_CONCURRENCY, dates.length) }, run))
+  if (failed) throw failure
+  return results as StationDayResponse[]
+}
+
 const worker = {
   async fetch(request: Request, env: WorkerEnv, _ctx: object): Promise<Response> {
     const origin = allowedOrigin(request, env)
@@ -169,7 +199,7 @@ const worker = {
     const cache = getCache()
     try {
       const timeoutMs = env.__TEST_TIMEOUT_MS && Number.isFinite(env.__TEST_TIMEOUT_MS) && env.__TEST_TIMEOUT_MS > 0 ? env.__TEST_TIMEOUT_MS : UPSTREAM_TIMEOUT_MS
-      const days = await Promise.all(params.dates.map((date) => resolveStationDay(sourceBase, date, params.stationId, timeoutMs, cache)))
+      const days = await resolveStationDays(sourceBase, params.dates, params.stationId, timeoutMs, cache)
       const canonical = json(params.batch ? { days } : days[0], 200)
       canonical.headers.set('cache-control', `public, max-age=${CACHE_MAX_AGE_SECONDS}`)
       return withCors(canonical, origin)
