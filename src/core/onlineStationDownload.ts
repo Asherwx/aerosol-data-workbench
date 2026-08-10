@@ -36,7 +36,7 @@ function endpointUrl(value: string): URL {
 }
 
 function normalizeConcurrency(value: number | undefined): number {
-  if (value === undefined) return 2
+  if (value === undefined) return 1
   if (!Number.isInteger(value) || value < 1) throw new Error('concurrency must be a whole number of at least 1')
   return Math.min(value, 4)
 }

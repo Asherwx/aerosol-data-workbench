@@ -63,6 +63,24 @@ describe('downloadStationRange', () => {
     expect(result.warningTotal).toBe(0)
   })
 
+  it('serializes daily requests by default to avoid overwhelming the upstream data source', async () => {
+    let active = 0
+    let maximum = 0
+    await downloadStationRange({
+      startDate: '2024-11-01', endDate: '2024-11-03', stationId: '3329A', endpoint: 'https://example.test/data', signal,
+      fetcher: async (input) => {
+        active += 1
+        maximum = Math.max(maximum, active)
+        const date = new URL(String(input)).searchParams.get('date') ?? ''
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        active -= 1
+        return new Response(stationDayResponse(date, 1), { headers: { 'content-type': 'application/json' } })
+      },
+    })
+
+    expect(maximum).toBe(1)
+  })
+
   it('refuses to create a partial file when any requested date still fails', async () => {
     await expect(downloadStationRange({
       startDate: '2024-11-01',
