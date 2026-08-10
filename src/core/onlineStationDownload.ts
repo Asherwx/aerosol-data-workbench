@@ -15,6 +15,9 @@ const MAX_RANGE_WARNING_TOTAL =
   MAX_DOWNLOAD_RANGE_DAYS * (MAX_DAY_WARNING_TOTAL + 24 * 6 + 1)
 const MAX_DATA_TYPES_PER_HOUR = 64
 const MAX_DAY_ATTEMPTS = 3
+const MAX_BATCH_DAYS = 6
+
+type DayData = { rows: HourlyStationRow[]; allRows: HourlyStationDataRow[]; warnings: string[]; warningTotal: number }
 
 function abortError(): DOMException {
   return new DOMException('The station download was aborted.', 'AbortError')
@@ -44,6 +47,14 @@ function normalizeConcurrency(value: number | undefined): number {
 function dayUrl(endpoint: URL, date: string, stationId: string): string {
   const url = new URL(endpoint.toString())
   url.searchParams.set('date', date)
+  url.searchParams.set('station', stationId)
+  return url.toString()
+}
+
+function batchUrl(endpoint: URL, dates: readonly string[], stationId: string): string {
+  const url = new URL(endpoint.toString())
+  url.searchParams.delete('date')
+  url.searchParams.set('dates', dates.join(','))
   url.searchParams.set('station', stationId)
   return url.toString()
 }
@@ -104,23 +115,12 @@ class WarningCollector {
   }
 }
 
-async function fetchDay(
-  url: string,
+function parseDayPayload(
+  payload: unknown,
   date: string,
   filename: string,
   stationId: string,
-  fetcher: typeof fetch,
-  signal: AbortSignal,
-): Promise<{ rows: HourlyStationRow[]; allRows: HourlyStationDataRow[]; warnings: string[]; warningTotal: number }> {
-  const response = await fetcher(url, { signal })
-  if (!response.ok) throw new Error(`HTTP ${response.status}`)
-  const contentType = response.headers.get('content-type') ?? ''
-  if (!/^application\/json(?:\s*;|$)/i.test(contentType)) throw new Error(`unexpected content type ${boundedMessage(contentType)}`)
-  const declaredLength = Number(response.headers.get('content-length'))
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) throw new Error('response exceeds the 5 MiB safety limit')
-  const text = await readBoundedUtf8(response)
-  let payload: unknown
-  try { payload = JSON.parse(text) } catch { throw new Error('response JSON is malformed') }
+): DayData {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('response schema is invalid')
   const record = payload as Record<string, unknown>
   if (record.date !== date || record.stationId !== stationId || record.sourceFilename !== filename) {
@@ -175,6 +175,42 @@ async function fetchDay(
   return { rows, allRows, warnings, warningTotal: record.warningTotal as number }
 }
 
+async function fetchJson(url: string, fetcher: typeof fetch, signal: AbortSignal): Promise<unknown> {
+  const response = await fetcher(url, { signal })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  const contentType = response.headers.get('content-type') ?? ''
+  if (!/^application\/json(?:\s*;|$)/i.test(contentType)) throw new Error(`unexpected content type ${boundedMessage(contentType)}`)
+  const declaredLength = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) throw new Error('response exceeds the 1 MiB safety limit')
+  const text = await readBoundedUtf8(response)
+  try { return JSON.parse(text) } catch { throw new Error('response JSON is malformed') }
+}
+
+async function fetchDay(
+  url: string,
+  date: string,
+  filename: string,
+  stationId: string,
+  fetcher: typeof fetch,
+  signal: AbortSignal,
+): Promise<DayData> {
+  return parseDayPayload(await fetchJson(url, fetcher, signal), date, filename, stationId)
+}
+
+async function fetchBatch(
+  url: string,
+  links: ReadonlyArray<{ date: string; filename: string }>,
+  stationId: string,
+  fetcher: typeof fetch,
+  signal: AbortSignal,
+): Promise<DayData[]> {
+  const payload = await fetchJson(url, fetcher, signal)
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('batch response schema is invalid')
+  const days = (payload as Record<string, unknown>).days
+  if (!Array.isArray(days) || days.length !== links.length) throw new Error('batch response days do not match the request')
+  return days.map((day, index) => parseDayPayload(day, links[index].date, links[index].filename, stationId))
+}
+
 function retryDelay(signal: AbortSignal, milliseconds: number): Promise<void> {
   if (signal.aborted) return Promise.reject(abortError())
   return new Promise((resolve, reject) => {
@@ -202,6 +238,29 @@ async function fetchDayWithRetry(
   for (let attempt = 1; attempt <= MAX_DAY_ATTEMPTS; attempt += 1) {
     try {
       return await fetchDay(url, date, filename, stationId, fetcher, signal)
+    } catch (error) {
+      if (signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) throw error
+      lastError = error
+      const message = error instanceof Error ? error.message : String(error)
+      const retryable = error instanceof TypeError || /^HTTP (?:408|429|5\d\d)$/.test(message)
+      if (!retryable || attempt === MAX_DAY_ATTEMPTS) break
+      await retryDelay(signal, attempt === 1 ? 100 : 300)
+    }
+  }
+  throw lastError
+}
+
+async function fetchBatchWithRetry(
+  url: string,
+  links: ReadonlyArray<{ date: string; filename: string }>,
+  stationId: string,
+  fetcher: typeof fetch,
+  signal: AbortSignal,
+): Promise<DayData[]> {
+  let lastError: unknown
+  for (let attempt = 1; attempt <= MAX_DAY_ATTEMPTS; attempt += 1) {
+    try {
+      return await fetchBatch(url, links, stationId, fetcher, signal)
     } catch (error) {
       if (signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) throw error
       lastError = error
@@ -274,30 +333,56 @@ export async function downloadStationRange(options: DownloadStationRangeOptions)
     }
   }
   try {
-    const worker = async (): Promise<void> => {
-      while (!stopped) {
-        const index = next
-        next += 1
-        if (index >= links.length) return
-        const link = links[index]
+    if (options.concurrency === undefined && links.length > 1) {
+      for (let start = 0; start < links.length && !stopped; start += MAX_BATCH_DAYS) {
+        const batch = links.slice(start, start + MAX_BATCH_DAYS)
         try {
-          const result = await fetchDayWithRetry(dayUrl(endpoint, link.date, stationId), link.date, link.filename, stationId, fetcher, internalController.signal)
-          if (stopped) return
-          outcomes[index] = result
-          completed += 1
-          reportProgress()
-          if (stopped) return
+          const results = await fetchBatchWithRetry(batchUrl(endpoint, batch.map((link) => link.date), stationId), batch, stationId, fetcher, internalController.signal)
+          if (stopped) break
+          for (const [offset, result] of results.entries()) {
+            outcomes[start + offset] = result
+            completed += 1
+            reportProgress()
+            if (stopped) break
+          }
         } catch (error) {
-          if (stopped || (error instanceof DOMException && error.name === 'AbortError')) return
-          outcomes[index] = { error: boundedMessage(error instanceof Error ? error.message : error) }
-          completed += 1
-          failed += 1
-          reportProgress()
-          if (stopped) return
+          if (stopped || (error instanceof DOMException && error.name === 'AbortError')) break
+          const message = boundedMessage(error instanceof Error ? error.message : error)
+          for (let offset = 0; offset < batch.length; offset += 1) {
+            outcomes[start + offset] = { error: message }
+            completed += 1
+            failed += 1
+            reportProgress()
+            if (stopped) break
+          }
         }
       }
+    } else {
+      const worker = async (): Promise<void> => {
+        while (!stopped) {
+          const index = next
+          next += 1
+          if (index >= links.length) return
+          const link = links[index]
+          try {
+            const result = await fetchDayWithRetry(dayUrl(endpoint, link.date, stationId), link.date, link.filename, stationId, fetcher, internalController.signal)
+            if (stopped) return
+            outcomes[index] = result
+            completed += 1
+            reportProgress()
+            if (stopped) return
+          } catch (error) {
+            if (stopped || (error instanceof DOMException && error.name === 'AbortError')) return
+            outcomes[index] = { error: boundedMessage(error instanceof Error ? error.message : error) }
+            completed += 1
+            failed += 1
+            reportProgress()
+            if (stopped) return
+          }
+        }
+      }
+      await Promise.all(Array.from({ length: Math.min(concurrency, links.length) }, worker))
     }
-    await Promise.all(Array.from({ length: Math.min(concurrency, links.length) }, worker))
     if (progressFailure) throw progressFailure
     if (externallyAborted) throw abortError()
   } finally {

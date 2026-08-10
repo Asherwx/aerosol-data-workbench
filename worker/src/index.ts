@@ -7,6 +7,7 @@ const UPSTREAM_TIMEOUT_MS = 30_000
 const CACHE_MAX_AGE_SECONDS = 6 * 60 * 60
 const CACHE_SCHEMA_VERSION = '2'
 const ERROR_LIMIT = 256
+const MAX_BATCH_DAYS = 6
 
 export interface WorkerEnv {
   ALLOWED_ORIGINS: string
@@ -70,16 +71,16 @@ function cacheKey(date: string, stationId: string): Request {
   return new Request(`https://station-day-cache.invalid${ROUTE_PATH}?schema=${CACHE_SCHEMA_VERSION}&date=${date}&station=${stationId}`)
 }
 
-function requestParameters(url: URL): { date: string; stationId: string } | undefined {
-  const date = url.searchParams.get('date') ?? ''
+function requestParameters(url: URL): { dates: string[]; stationId: string; batch: boolean } | undefined {
   const stationId = url.searchParams.get('station') ?? ''
   if (!STATION_ID_PATTERN.test(stationId)) return undefined
-  try {
-    parseIsoDateStrict(date)
-    return { date, stationId }
-  } catch {
-    return undefined
-  }
+  const date = url.searchParams.get('date')
+  const datesValue = url.searchParams.get('dates')
+  if ((date === null) === (datesValue === null)) return undefined
+  const dates = datesValue === null ? [date!] : datesValue.split(',')
+  if (dates.length < 1 || dates.length > MAX_BATCH_DAYS || new Set(dates).size !== dates.length) return undefined
+  try { dates.forEach((value) => parseIsoDateStrict(value)) } catch { return undefined }
+  return { dates, stationId, batch: datesValue !== null }
 }
 
 async function boundedCsv(response: Response): Promise<string> {
@@ -127,6 +128,28 @@ async function loadStationDay(sourceUrl: string, date: string, stationId: string
   }
 }
 
+async function resolveStationDay(
+  sourceBase: URL,
+  date: string,
+  stationId: string,
+  timeoutMs: number,
+  cache: CacheLike | undefined,
+): Promise<StationDayResponse> {
+  const key = cacheKey(date, stationId)
+  try {
+    const cached = await cache?.match(key)
+    if (cached?.ok) return await cached.json() as StationDayResponse
+  } catch {
+    // Cache outages or malformed cache entries are safe to treat as misses.
+  }
+  const sourceUrl = new URL(`china_sites_${date.replaceAll('-', '')}.csv`, sourceBase).toString()
+  const result = await loadStationDay(sourceUrl, date, stationId, timeoutMs)
+  const canonical = json(result, 200)
+  canonical.headers.set('cache-control', `public, max-age=${CACHE_MAX_AGE_SECONDS}`)
+  try { await cache?.put(key, canonical.clone()) } catch { /* optional cache */ }
+  return result
+}
+
 const worker = {
   async fetch(request: Request, env: WorkerEnv, _ctx: object): Promise<Response> {
     const origin = allowedOrigin(request, env)
@@ -143,20 +166,12 @@ const worker = {
     if (!params) return error(400, '日期或站点编号格式无效', origin)
     const sourceBase = validSourceBase(env.SOURCE_BASE_URL)
     if (!sourceBase) return error(500, '服务配置无效', origin)
-    const key = cacheKey(params.date, params.stationId)
     const cache = getCache()
     try {
-      const cached = await cache?.match(key)
-      if (cached?.ok) return withCors(cached, origin)
-    } catch {
-      // Cache outages are safe to treat as misses.
-    }
-    const sourceUrl = new URL(`china_sites_${params.date.replaceAll('-', '')}.csv`, sourceBase).toString()
-    try {
-      const result = await loadStationDay(sourceUrl, params.date, params.stationId, env.__TEST_TIMEOUT_MS && Number.isFinite(env.__TEST_TIMEOUT_MS) && env.__TEST_TIMEOUT_MS > 0 ? env.__TEST_TIMEOUT_MS : UPSTREAM_TIMEOUT_MS)
-      const canonical = json(result, 200)
+      const timeoutMs = env.__TEST_TIMEOUT_MS && Number.isFinite(env.__TEST_TIMEOUT_MS) && env.__TEST_TIMEOUT_MS > 0 ? env.__TEST_TIMEOUT_MS : UPSTREAM_TIMEOUT_MS
+      const days = await Promise.all(params.dates.map((date) => resolveStationDay(sourceBase, date, params.stationId, timeoutMs, cache)))
+      const canonical = json(params.batch ? { days } : days[0], 200)
       canonical.headers.set('cache-control', `public, max-age=${CACHE_MAX_AGE_SECONDS}`)
-      try { await cache?.put(key, canonical.clone()) } catch { /* optional cache */ }
       return withCors(canonical, origin)
     } catch (cause) {
       if (cause instanceof UpstreamTooLargeError) return error(413, '上游 CSV 文件超过大小限制', origin)

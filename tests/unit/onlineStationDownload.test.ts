@@ -63,22 +63,45 @@ describe('downloadStationRange', () => {
     expect(result.warningTotal).toBe(0)
   })
 
-  it('serializes daily requests by default to avoid overwhelming the upstream data source', async () => {
+  it('batches daily requests by default to avoid browser transport exhaustion', async () => {
     let active = 0
     let maximum = 0
+    const urls: string[] = []
     await downloadStationRange({
       startDate: '2024-11-01', endDate: '2024-11-03', stationId: '3329A', endpoint: 'https://example.test/data', signal,
       fetcher: async (input) => {
         active += 1
         maximum = Math.max(maximum, active)
-        const date = new URL(String(input)).searchParams.get('date') ?? ''
+        urls.push(String(input))
+        const dates = new URL(String(input)).searchParams.get('dates')?.split(',') ?? []
         await new Promise((resolve) => setTimeout(resolve, 5))
         active -= 1
-        return new Response(stationDayResponse(date, 1), { headers: { 'content-type': 'application/json' } })
+        return new Response(JSON.stringify({ days: dates.map((date) => JSON.parse(stationDayResponse(date, 1))) }), {
+          headers: { 'content-type': 'application/json' },
+        })
       },
     })
 
     expect(maximum).toBe(1)
+    expect(urls).toHaveLength(1)
+    expect(new URL(urls[0]).searchParams.get('dates')).toBe('2024-11-01,2024-11-02,2024-11-03')
+  })
+
+  it('limits each browser batch to six dates', async () => {
+    const batchSizes: number[] = []
+    const result = await downloadStationRange({
+      startDate: '2024-11-01', endDate: '2024-11-13', stationId: '3329A', endpoint: 'https://example.test/data', signal,
+      fetcher: async (input) => {
+        const dates = new URL(String(input)).searchParams.get('dates')?.split(',') ?? []
+        batchSizes.push(dates.length)
+        return new Response(JSON.stringify({ days: dates.map((date) => JSON.parse(stationDayResponse(date, 1))) }), {
+          headers: { 'content-type': 'application/json' },
+        })
+      },
+    })
+
+    expect(batchSizes).toEqual([6, 6, 1])
+    expect(result.rows).toHaveLength(13)
   })
 
   it('refuses to create a partial file when any requested date still fails', async () => {
@@ -88,6 +111,7 @@ describe('downloadStationRange', () => {
       stationId: '3329A',
       endpoint: 'https://example.test/data',
       signal,
+      concurrency: 1,
       fetcher: async (input) => {
         if (String(input).includes('2024-11-02')) return new Response('nope', { status: 503 })
         const date = new URL(String(input)).searchParams.get('date') ?? '2024-11-01'

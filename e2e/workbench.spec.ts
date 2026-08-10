@@ -115,15 +115,14 @@ async function installStationApi(page: Page, options: StationApiOptions = {}) {
     requests.push(url.toString())
     if (options.delayMs) await new Promise((resolveDelay) => setTimeout(resolveDelay, options.delayMs))
     const date = url.searchParams.get('date') ?? ''
+    const dates = url.searchParams.get('dates')?.split(',') ?? [date]
     const stationId = url.searchParams.get('station') ?? ''
-    const rows = stationRows(date)
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json; charset=utf-8',
-      body: JSON.stringify({
-        date,
+    const dayPayload = (nextDate: string) => {
+      const rows = stationRows(nextDate)
+      return {
+        date: nextDate,
         stationId,
-        sourceFilename: `china_sites_${date.replaceAll('-', '')}.csv`,
+        sourceFilename: `china_sites_${nextDate.replaceAll('-', '')}.csv`,
         rows,
         allRows: rows.map(({ timestamp, ...values }) => ({
           timestamp,
@@ -131,7 +130,12 @@ async function installStationApi(page: Page, options: StationApiOptions = {}) {
         })),
         warnings: [],
         warningTotal: 0,
-      }),
+      }
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json; charset=utf-8',
+      body: JSON.stringify(url.searchParams.has('dates') ? { days: dates.map(dayPayload) } : dayPayload(date)),
     }).catch(() => undefined)
   })
   return requests
@@ -364,11 +368,11 @@ test('online station workflow uses the same-origin API, downloads exact CSV, and
   expect(lines[1]).toBe('3329A,2024-11-01 00:00:00,10,20,30,0.5,40,25,80,15')
   expect(lines.at(-1)).toBe('3329A,2024-11-03 23:00:00,12,43,53,0.5,63,48,80,15')
 
-  const expected = ['2024-11-01', '2024-11-02', '2024-11-03'].map((date) =>
-    `http://127.0.0.1:4173/aerosol-data-workbench/v1/station-day?date=${date}&station=3329A`,
-  )
-  await expect.poll(() => requests.length).toBe(3)
-  expect([...requests].sort()).toEqual(expected)
+  await expect.poll(() => requests.length).toBe(1)
+  const requestUrl = new URL(requests[0])
+  expect(`${requestUrl.origin}${requestUrl.pathname}`).toBe('http://127.0.0.1:4173/aerosol-data-workbench/v1/station-day')
+  expect(requestUrl.searchParams.get('station')).toBe('3329A')
+  expect(requestUrl.searchParams.get('dates')).toBe('2024-11-01,2024-11-02,2024-11-03')
 
   await goToStep(page, '构建逐时序列')
   await page.locator('.active-panel').getByRole('button', { name: '构建逐时序列', exact: true }).click()

@@ -59,6 +59,35 @@ describe('station day HTTP worker', () => {
     )
   })
 
+  it('returns a bounded batch of station days in one browser request', async () => {
+    const fetchSpy = vi.fn(async (input: string) => {
+      const rawDate = input.match(/china_sites_(\d{8})\.csv$/)?.[1] ?? ''
+      const body = ['date,hour,type,3329A', `${rawDate},0,SO2,3`].join('\n')
+      return upstream(body)
+    })
+    vi.stubGlobal('fetch', fetchSpy)
+    vi.stubGlobal('caches', { default: new MemoryCache() })
+
+    const response = await worker.fetch(request('/v1/station-day?dates=2024-11-01,2024-11-02,2024-11-03&station=3329A'), ENV, {})
+    const body = await response.json() as { days?: Array<{ date: string }> }
+
+    expect(response.status).toBe(200)
+    expect(body.days?.map((day) => day.date)).toEqual(['2024-11-01', '2024-11-02', '2024-11-03'])
+    expect(fetchSpy).toHaveBeenCalledTimes(3)
+  })
+
+  it('rejects oversized, duplicate, or malformed date batches before upstream access', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    vi.stubGlobal('caches', { default: new MemoryCache() })
+    const tooMany = Array.from({ length: 7 }, (_, index) => `2024-11-${String(index + 1).padStart(2, '0')}`).join(',')
+    for (const dates of [tooMany, '2024-11-01,2024-11-01', '2024-11-01,2024-02-30']) {
+      const response = await worker.fetch(request(`/v1/station-day?dates=${dates}&station=3329A`), ENV, {})
+      expect(response.status).toBe(400)
+    }
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
   it('accepts the upstream octet-stream content type used for daily CSV files', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => upstream(CSV, {
       headers: { 'content-type': 'application/octet-stream' },
